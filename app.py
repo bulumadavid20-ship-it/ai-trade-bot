@@ -1,46 +1,21 @@
- import streamlit as st
-import sqlite3
-import hashlib
-import uuid
-import base64
-import json
-import requests
+import streamlit as st
+import sqlite3, hashlib, uuid, base64, json, itertools, requests
 from PIL import Image
 from io import BytesIO
 from openai import OpenAI
 
-# --- OWNER & PAYMENT CONFIGURATION ---
 ADMIN_EMAIL = "bulumadavid20@gmail.com"
 STRIPE_PAYMENT_LINK = "https://stripe.com"
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
 FINNHUB_API_KEY = st.secrets.get("FINNHUB_API_KEY", "YOUR_FINNHUB_API_KEY")
-
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- PAGE & DARK THEME STYLING ---
 st.set_page_config(page_title="AI Trade Lens", page_icon="⚡", layout="centered")
+st.markdown("<style>.stApp{background-color:#0B0C10;color:#FFF;}div[data-testid='stMetricValue']{color:#A855F7;}</style>", unsafe_allow_html=True)
 
-st.markdown("""
-    <style>
-    .stApp { background-color: #0B0C10; color: #FFFFFF; }
-    .stButton>button { border-radius: 10px; font-weight: bold; }
-    div[data-testid="stMetricValue"] { color: #A855F7; }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- DATABASE SETUP ---
 conn = sqlite3.connect("users.db", check_same_thread=False)
 c = conn.cursor()
-c.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        email TEXT PRIMARY KEY,
-        password TEXT,
-        plan TEXT,
-        ref_code TEXT,
-        referred_by TEXT,
-        scans_today INTEGER
-    )
-""")
+c.execute("CREATE TABLE IF NOT EXISTS users (email TEXT PRIMARY KEY, password TEXT, plan TEXT, ref_code TEXT, referred_by TEXT, scans_today INTEGER)")
 conn.commit()
 
 def hash_pw(pw):
@@ -61,64 +36,47 @@ def create_user(email, pw, referred_by=""):
     except sqlite3.IntegrityError:
         return False
 
-# --- SESSION STATE & REFERRALS ---
-query_params = st.query_params
-incoming_ref = query_params.get("ref", "")
+incoming_ref = st.query_params.get("ref", "")
+if "user_email" not in st.session_state: st.session_state.user_email = None
+if "signals_history" not in st.session_state: st.session_state.signals_history = list()
+if "chat_messages" not in st.session_state: st.session_state.chat_messages = list()
 
-if "user_email" not in st.session_state:
-    st.session_state.user_email = None
-if "signals_history" not in st.session_state:
-    st.session_state.signals_history = []
-if "chat_messages" not in st.session_state:
-    st.session_state.chat_messages = []
-
-# --- LOGIN / SIGNUP SCREEN ---
 if not st.session_state.user_email:
     st.title("⚡ AI Trade Lens")
     st.caption("Institutional Chart Vision, NFP/CPI NewsIQ & Auto-Trading")
-    
-    auth_tab1, auth_tab2 = st.tabs(["🔑 Log In", "📝 Create Free Account"])
-    
-    with auth_tab1:
-        login_email = st.text_input("Email Address", key="l_email")
-        login_pw = st.text_input("Password", type="password", key="l_pw")
+    t1, t2 = st.tabs(("🔑 Log In", "📝 Create Free Account"))
+    with t1:
+        le = st.text_input("Email Address", key="l_email")
+        lp = st.text_input("Password", type="password", key="l_pw")
         if st.button("Log In", type="primary", use_container_width=True):
-            user = get_user(login_email)
-            if user and user[1] == hash_pw(login_pw):
-                st.session_state.user_email = user[0]
-                st.rerun()
-            else:
-                st.error("Invalid email or password.")
-                
-    with auth_tab2:
-        reg_email = st.text_input("Email Address", key="r_email")
-        reg_pw = st.text_input("Create Password", type="password", key="r_pw")
-        ref_input = st.text_input("Referral Code (Optional)", value=incoming_ref)
+            u = get_user(le)
+            if u:
+                u_em, u_pw, u_pl, u_rf, u_by, u_sc = u
+                if u_pw == hash_pw(lp):
+                    st.session_state.user_email = u_em
+                    st.rerun()
+                else: st.error("Invalid email or password.")
+            else: st.error("Invalid email or password.")
+    with t2:
+        re = st.text_input("Email Address", key="r_email")
+        rp = st.text_input("Create Password", type="password", key="r_pw")
+        ri = st.text_input("Referral Code (Optional)", value=incoming_ref)
         if st.button("Sign Up Free", type="primary", use_container_width=True):
-            if reg_email and reg_pw:
-                if create_user(reg_email, reg_pw, ref_input):
-                    st.success("Account created! Switch to 'Log In' tab.")
-                else:
-                    st.error("Email already registered.")
-            else:
-                st.warning("Please enter both email and password.")
+            if re and rp:
+                if create_user(re, rp, ri): st.success("Account created! Switch to 'Log In' tab.")
+                else: st.error("Email already registered.")
+            else: st.warning("Please enter both email and password.")
     st.stop()
 
-# --- LOAD LOGGED-IN USER ---
-user_data = get_user(st.session_state.user_email)
-user_email, _, user_plan, user_ref_code, _, scans_today = user_data
+user_email, _, user_plan, user_ref_code, _, scans_today = get_user(st.session_state.user_email)
 is_vip = (user_plan == "ULTIMATE") or (user_email == ADMIN_EMAIL.lower().strip())
 
-# --- HELPER FUNCTIONS ---
 def fetch_macro_news():
     try:
-        url = f"https://finnhub.io{FINNHUB_API_KEY}"
-        res = requests.get(url, timeout=6).json()
-        events = res.get("economicCalendar", [])
-        usd_high = [e for e in events if e.get("country") == "US" and e.get("impact") == "high"]
-        return usd_high[:6]
-    except Exception:
-        return []
+        res = requests.get("https://finnhub.io" + FINNHUB_API_KEY, timeout=6).json()
+        events = res.get("economicCalendar", list())
+        return list(itertools.islice((e for e in events if e.get("country") == "US" and e.get("impact") == "high"), 6))
+    except Exception: return list()
 
 def encode_img(img):
     buf = BytesIO()
@@ -126,115 +84,102 @@ def encode_img(img):
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 def analyze_chart(b64_image, custom_rules, multi_tf):
-    prompt = f"""
-    You are an institutional quantitative trading AI. Analyze the chart screenshot.
-    Multi-Timeframe Mode: {multi_tf}
-    Strategy Rules: {custom_rules}
-    Return ONLY valid JSON with keys: asset, timeframe, market_bias, signal, confidence_percent, entry_price, stop_loss, take_profit_1, take_profit_2, risk_reward, reasoning.
-    """
-    res = client.chat.completions.create(
-        model="gpt-4o",
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": [
-                {"type": "text", "text": "Analyze this chart and provide exact entry, SL, TP, and confidence."},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}}
-            ]}
-        ],
-        temperature=0.1
-    )
-    return json.loads(res.choices[0].message.content)
+    prompt = f"You are an institutional trading AI. Multi-TF: {multi_tf}. Rules: {custom_rules}. Return ONLY valid JSON with keys: asset, timeframe, signal, confidence_percent, entry_price, stop_loss, take_profit_1, risk_reward, reasoning."
+    msgs = list(({"role": "system", "content": prompt}, {"role": "user", "content": list(({"type": "text", "text": "Analyze chart."}, {"type": "image_url", "image_url": {"url": "data:image/png;base64," + b64_image}}))}))
+    res = client.chat.completions.create(model="gpt-4o", response_format={"type": "json_object"}, messages=msgs, temperature=0.1)
+    return json.loads(next(iter(res.choices)).message.content)
 
-# --- TOP BAR ---
-col_top1, col_top2 = st.columns([3, 1])
-with col_top1:
-    badge = "👑 OWNER / ULTIMATE" if is_vip else "🆓 FREE PLAN"
-    st.markdown(f"**{user_email}** • `{badge}`")
-with col_top2:
-    if st.button("Logout"):
-        st.session_state.user_email = None
-        st.rerun()
+c1, c2 = st.columns((3, 1))
+c1.markdown(f"**{user_email}** • `{'👑 OWNER / ULTIMATE' if is_vip else '🆓 FREE PLAN'}`")
+if c2.button("Logout"):
+    st.session_state.user_email = None
+    st.rerun()
 
-# --- NAVIGATION TABS ---
-tabs = ["🏠 Overview", "⬆️ Upload Chart", "📰 NewsIQ", "💬 AI Assistant", "⚡ Auto & MT5", "💎 Upgrade / Refer"]
 if user_email == ADMIN_EMAIL.lower().strip():
-    tabs.append("🛠️ Admin")
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(("🏠 Overview", "⬆️ Upload Chart", "📰 NewsIQ", "💬 AI Assistant", "⚡ Auto & MT5", "💎 Upgrade", "🛠️ Admin"))
+else:
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(("🏠 Overview", "⬆️ Upload Chart", "📰 NewsIQ", "💬 AI Assistant", "⚡ Auto & MT5", "💎 Upgrade"))
+    tab7 = None
 
-selected_tabs = st.tabs(tabs)
-
-# --- TAB 1: OVERVIEW ---
-with selected_tabs[0]:
+with tab1:
     st.subheader("Dashboard Overview")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Analyses Run", len(st.session_state.signals_history))
-    c2.metric("Account Tier", "ULTIMATE" if is_vip else "FREE")
-    c3.metric("News Protection", "ACTIVE" if is_vip else "LOCKED")
-    
-    st.subheader("Recent Pulse Signals")
-    if not st.session_state.signals_history:
-        st.info("No signals generated yet. Tap 'Upload Chart' to scan your first chart!")
-    for s in reversed(st.session_state.signals_history[-5:]):
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Analyses Run", len(st.session_state.signals_history))
+    m2.metric("Account Tier", "ULTIMATE" if is_vip else "FREE")
+    m3.metric("News Protection", "ACTIVE" if is_vip else "LOCKED")
+    for s in itertools.islice(reversed(st.session_state.signals_history), 5):
         with st.container(border=True):
-            st.write(f"**{s.get('asset', 'Chart')}** ({s.get('timeframe', 'M5')}) — **{s.get('signal')}** ({s.get('confidence_percent')}% Confidence)")
-            st.caption(f"Entry: `{s.get('entry_price')}` | SL: `{s.get('stop_loss')}` | TP1: `{s.get('take_profit_1')}` | R:R: {s.get('risk_reward')}")
+            st.write(f"**{s.get('asset', 'Chart')}** — **{s.get('signal')}** ({s.get('confidence_percent')}%)")
+            st.caption(f"Entry: `{s.get('entry_price')}` | SL: `{s.get('stop_loss')}` | TP1: `{s.get('take_profit_1')}`")
 
-# --- TAB 2: UPLOAD CHART ---
-with selected_tabs[1]:
+with tab2:
     st.subheader("Upload Your Chart")
-    multi_tf = st.toggle("Multi-Timeframe Analysis Mode (VIP)", value=False, disabled=not is_vip)
-    custom_strategy = st.text_input("Custom Strategy Focus", value="Price action, liquidity sweeps, support/resistance")
-    uploaded_img = st.file_uploader("Upload Chart Image", type=["png", "jpg", "jpeg"])
-    
+    multi_tf = st.toggle("Multi-Timeframe Mode (VIP)", value=False, disabled=not is_vip)
+    custom_strategy = st.text_input("Strategy Focus", value="Price action, liquidity sweeps, support/resistance")
+    uploaded_img = st.file_uploader("Upload Chart Image", type=("png", "jpg", "jpeg"))
     if uploaded_img:
         img = Image.open(uploaded_img)
-        st.image(img, caption="Uploaded Chart", use_container_width=True)
+        st.image(img, use_container_width=True)
         if st.button("🔍 Analyze Chart Now", type="primary", use_container_width=True):
-            if not is_vip and scans_today >= 2:
-                st.error("Free Plan limit reached (2 scans/day). Upgrade for unlimited scans!")
+            if not is_vip and scans_today >= 2: st.error("Free Plan limit reached (2 scans/day). Upgrade for unlimited scans!")
             else:
-                with st.spinner("AI Vision scanning chart..."):
+                with st.spinner("Scanning chart..."):
                     try:
-                        b64 = encode_img(img)
-                        result = analyze_chart(b64, custom_strategy, multi_tf)
-                        st.session_state.signals_history.append(result)
+                        res = analyze_chart(encode_img(img), custom_strategy, multi_tf)
+                        st.session_state.signals_history.append(res)
                         c.execute("UPDATE users SET scans_today = scans_today + 1 WHERE email=?", (user_email,))
                         conn.commit()
-                        
-                        m1, m2, m3 = st.columns(3)
-                        m1.metric("Signal", result.get("signal", "WAIT"))
-                        m2.metric("Confidence", f"{result.get('confidence_percent', 0)}%")
-                        m3.metric("Risk : Reward", result.get("risk_reward", "N/A"))
-                        
-                        st.success(f"🎯 **Entry:** `{result.get('entry_price')}` | 🛑 **SL:** `{result.get('stop_loss')}` | ✅ **TP1:** `{result.get('take_profit_1')}`")
-                        for reason in result.get("reasoning", []):
-                            st.write(f"• {reason}")
-                    except Exception as e:
-                        st.error(f"Check your OPENAI_API_KEY in Streamlit Secrets. Error: {e}")
+                        a, b, d = st.columns(3)
+                        a.metric("Signal", res.get("signal", "WAIT"))
+                        b.metric("Confidence", f"{res.get('confidence_percent', 0)}%")
+                        d.metric("Risk : Reward", res.get("risk_reward", "N/A"))
+                        st.success(f"🎯 **Entry:** `{res.get('entry_price')}` | 🛑 **SL:** `{res.get('stop_loss')}` | ✅ **TP1:** `{res.get('take_profit_1')}`")
+                        for r in res.get("reasoning", list()): st.write(f"• {r}")
+                    except Exception as e: st.error(f"Check OPENAI_API_KEY in Streamlit Secrets. Error: {e}")
 
-# --- TAB 3: NEWSIQ ---
-with selected_tabs[2]:
-    st.subheader("📰 NewsIQ — High-Impact NFP & CPI Events")
+with tab3:
+    st.subheader("📰 NewsIQ — High-Impact NFP & CPI")
     if not is_vip:
         st.warning("🔒 NewsIQ is an Ultimate Plan feature.")
-        st.link_button("Upgrade to Ultimate Plan", STRIPE_PAYMENT_LINK, type="primary")
+        st.link_button("Upgrade to Ultimate", STRIPE_PAYMENT_LINK, type="primary")
     else:
         events = fetch_macro_news()
-        if not events:
-            st.success("✅ No imminent high-impact USD news detected right now.")
-        else:
-            for ev in events:
-                with st.container(border=True):
-                    st.markdown(f"**🔴 {ev.get('event', 'High-Impact Event')}** (`{ev.get('country', 'US')}`)")
-                    st.caption(f"Time: {ev.get('time', 'N/A')} | Forecast: `{ev.get('estimate', 'N/A')}` | Prev: `{ev.get('prev', 'N/A')}`")
+        if not events: st.success("✅ No imminent high-impact USD news detected.")
+        for ev in events:
+            with st.container(border=True):
+                st.markdown(f"**🔴 {ev.get('event', 'Event')}** (`{ev.get('country', 'US')}`)")
+                st.caption(f"Time: {ev.get('time', 'N/A')} | Forecast: `{ev.get('estimate', 'N/A')}`")
 
-# --- TAB 4: AI ASSISTANT ---
-with selected_tabs[3]:
+with tab4:
     st.subheader("💬 Institutional AI Co-Pilot")
     for msg in st.session_state.chat_messages:
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
+        with st.chat_message(msg.get("role")): st.write(msg.get("content"))
+    prompt_txt = st.chat_input("Ask AI Trade Lens anything...")
+    if prompt_txt:
+        st.session_state.chat_messages.append({"role": "user", "content": prompt_txt})
+        with st.chat_message("user"): st.write(prompt_txt)
+        with st.chat_message("assistant"):
+            try:
+                sys_m = list(({"role": "system", "content": "You are an institutional trading mentor."},))
+                reply = client.chat.completions.create(model="gpt-4o-mini", messages=sys_m + st.session_state.chat_messages)
+                ans = next(iter(reply.choices)).message.content
+                st.write(ans)
+                st.session_state.chat_messages.append({"role": "assistant", "content": ans})
+            except Exception as e: st.error(f"Check OPENAI_API_KEY in Streamlit Secrets. Error: {e}")
 
-    user_prompt = st.chat_input("Ask AI Trade Lens anything...")
-    if user_prompt:
-        st.session_state.chat_messages.append({"role": "user", "content": user_prompt})
+with tab5:
+    st.subheader("⚡ MT5 & Webhook Auto-Execution")
+    if not is_vip:
+        st.warning("🔒 Auto-Trading requires the Ultimate Plan.")
+        st.link_button("Unlock Auto-Trading", STRIPE_PAYMENT_LINK, type="primary")
+    else:
+        st.text_input("Webhook / PineConnector URL", placeholder="https://...")
+        risk_pct = st.slider("Risk Per Trade (%)", 0.25, 5.0, 1.0, 0.25)
+        if st.button("Save Bridge Settings", type="primary"): st.success(f"Bridge active! Risk set to {risk_pct}%.")
+
+with tab6:
+    st.subheader("💎 Upgrade & Referrals")
+    if is_vip: st.success("👑 You have full **ULTIMATE VIP** access!")
+    else: st.link_button("🚀 Upgrade Now", STRIPE_PAYMENT_LINK, type="primary", use_container_width=True)
+    st.divider()
+    st.code("https://streamlit.app" + user_ref_code)
