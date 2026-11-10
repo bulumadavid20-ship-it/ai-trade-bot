@@ -1,18 +1,17 @@
-import streamlit as st
+ import streamlit as st
 import sqlite3
 import hashlib
 import uuid
 import base64
 import json
 import requests
-from datetime import datetime, timezone
 from PIL import Image
 from io import BytesIO
 from openai import OpenAI
 
 # --- OWNER & PAYMENT CONFIGURATION ---
-ADMIN_EMAIL = "bulumadavid20@gmail.com"  # Change to your login email for FREE VIP Ultimate access
-STRIPE_PAYMENT_LINK = "https://stripe.com"  # Replace with your Stripe/PayPal link
+ADMIN_EMAIL = "bulumadavid20@gmail.com"
+STRIPE_PAYMENT_LINK = "https://stripe.com"
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
 FINNHUB_API_KEY = st.secrets.get("FINNHUB_API_KEY", "YOUR_FINNHUB_API_KEY")
 
@@ -26,11 +25,10 @@ st.markdown("""
     .stApp { background-color: #0B0C10; color: #FFFFFF; }
     .stButton>button { border-radius: 10px; font-weight: bold; }
     div[data-testid="stMetricValue"] { color: #A855F7; }
-    .card { background-color: #161822; padding: 16px; border-radius: 12px; border: 1px solid #2A2D3D; margin-bottom: 12px; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- DATABASE SETUP (SQLite for Users & Referrals) ---
+# --- DATABASE SETUP ---
 conn = sqlite3.connect("users.db", check_same_thread=False)
 c = conn.cursor()
 c.execute("""
@@ -63,7 +61,7 @@ def create_user(email, pw, referred_by=""):
     except sqlite3.IntegrityError:
         return False
 
-# --- REFERRAL URL CAPTURE (?ref=CODE) ---
+# --- SESSION STATE & REFERRALS ---
 query_params = st.query_params
 incoming_ref = query_params.get("ref", "")
 
@@ -71,8 +69,10 @@ if "user_email" not in st.session_state:
     st.session_state.user_email = None
 if "signals_history" not in st.session_state:
     st.session_state.signals_history = []
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = []
 
-# --- AUTHENTICATION SCREEN (Matches your screenshot link style) ---
+# --- LOGIN / SIGNUP SCREEN ---
 if not st.session_state.user_email:
     st.title("⚡ AI Trade Lens")
     st.caption("Institutional Chart Vision, NFP/CPI NewsIQ & Auto-Trading")
@@ -157,25 +157,19 @@ with col_top2:
         st.rerun()
 
 # --- NAVIGATION TABS ---
-tabs = ["🏠 Overview", "⬆️ Upload Chart", "📰 NewsIQ (NFP/CPI)", "💬 AI Assistant", "⚡ Auto & MT5", "💎 Upgrade / Refer"]
+tabs = ["🏠 Overview", "⬆️ Upload Chart", "📰 NewsIQ", "💬 AI Assistant", "⚡ Auto & MT5", "💎 Upgrade / Refer"]
 if user_email == ADMIN_EMAIL.lower().strip():
     tabs.append("🛠️ Admin")
 
 selected_tabs = st.tabs(tabs)
 
-# --- TAB 1: OVERVIEW & MARKET PULSE ---
+# --- TAB 1: OVERVIEW ---
 with selected_tabs[0]:
     st.subheader("Dashboard Overview")
     c1, c2, c3 = st.columns(3)
     c1.metric("Analyses Run", len(st.session_state.signals_history))
     c2.metric("Account Tier", "ULTIMATE" if is_vip else "FREE")
     c3.metric("News Protection", "ACTIVE" if is_vip else "LOCKED")
-    
-    st.subheader("Live Market Pulse")
-    p1, p2, p3 = st.columns(3)
-    p1.metric("XAUUSD (Gold)", "Live Feed", "+0.45%")
-    p2.metric("EURUSD", "Live Feed", "+0.12%")
-    p3.metric("BTCUSD", "Live Feed", "+1.85%")
     
     st.subheader("Recent Pulse Signals")
     if not st.session_state.signals_history:
@@ -185,48 +179,62 @@ with selected_tabs[0]:
             st.write(f"**{s.get('asset', 'Chart')}** ({s.get('timeframe', 'M5')}) — **{s.get('signal')}** ({s.get('confidence_percent')}% Confidence)")
             st.caption(f"Entry: `{s.get('entry_price')}` | SL: `{s.get('stop_loss')}` | TP1: `{s.get('take_profit_1')}` | R:R: {s.get('risk_reward')}")
 
-# --- TAB 2: UPLOAD CHART SCANNER ---
+# --- TAB 2: UPLOAD CHART ---
 with selected_tabs[1]:
     st.subheader("Upload Your Chart")
-    st.caption("Upload a screenshot from TradingView or MT5 to get Entry, SL, TP & Confidence %.")
-    
     multi_tf = st.toggle("Multi-Timeframe Analysis Mode (VIP)", value=False, disabled=not is_vip)
-    custom_strategy = st.text_input("Custom Strategy Focus (Optional)", value="Price action, liquidity sweeps, support/resistance")
-    uploaded_img = st.file_uploader("Upload Chart Image (PNG, JPG, JPEG)", type=["png", "jpg", "jpeg"])
+    custom_strategy = st.text_input("Custom Strategy Focus", value="Price action, liquidity sweeps, support/resistance")
+    uploaded_img = st.file_uploader("Upload Chart Image", type=["png", "jpg", "jpeg"])
     
     if uploaded_img:
         img = Image.open(uploaded_img)
         st.image(img, caption="Uploaded Chart", use_container_width=True)
-        
         if st.button("🔍 Analyze Chart Now", type="primary", use_container_width=True):
             if not is_vip and scans_today >= 2:
-                st.error("Free Plan limit reached (2 scans/day). Go to 'Upgrade' tab for unlimited scans!")
+                st.error("Free Plan limit reached (2 scans/day). Upgrade for unlimited scans!")
             else:
-                with st.spinner("AI Vision scanning candlestick structure..."):
-                    b64 = encode_img(img)
-                    result = analyze_chart(b64, custom_strategy, multi_tf)
-                    st.session_state.signals_history.append(result)
-                    c.execute("UPDATE users SET scans_today = scans_today + 1 WHERE email=?", (user_email,))
-                    conn.commit()
-                    
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("Signal", result.get("signal", "WAIT"))
-                    m2.metric("Confidence", f"{result.get('confidence_percent', 0)}%")
-                    m3.metric("Risk : Reward", result.get("risk_reward", "N/A"))
-                    
-                    st.success(f"🎯 **Entry:** `{result.get('entry_price')}` | 🛑 **SL:** `{result.get('stop_loss')}` | ✅ **TP1:** `{result.get('take_profit_1')}` | ✅ **TP2:** `{result.get('take_profit_2')}`")
-                    for reason in result.get("reasoning", []):
-                        st.write(f"• {reason}")
+                with st.spinner("AI Vision scanning chart..."):
+                    try:
+                        b64 = encode_img(img)
+                        result = analyze_chart(b64, custom_strategy, multi_tf)
+                        st.session_state.signals_history.append(result)
+                        c.execute("UPDATE users SET scans_today = scans_today + 1 WHERE email=?", (user_email,))
+                        conn.commit()
+                        
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("Signal", result.get("signal", "WAIT"))
+                        m2.metric("Confidence", f"{result.get('confidence_percent', 0)}%")
+                        m3.metric("Risk : Reward", result.get("risk_reward", "N/A"))
+                        
+                        st.success(f"🎯 **Entry:** `{result.get('entry_price')}` | 🛑 **SL:** `{result.get('stop_loss')}` | ✅ **TP1:** `{result.get('take_profit_1')}`")
+                        for reason in result.get("reasoning", []):
+                            st.write(f"• {reason}")
+                    except Exception as e:
+                        st.error(f"Check your OPENAI_API_KEY in Streamlit Secrets. Error: {e}")
 
-# --- TAB 3: NEWSIQ (NFP / CPI CALENDAR) ---
+# --- TAB 3: NEWSIQ ---
 with selected_tabs[2]:
     st.subheader("📰 NewsIQ — High-Impact NFP & CPI Events")
     if not is_vip:
-        st.warning("🔒 NewsIQ Live NFP/CPI Countdown & AI Impact Analyzer is an Ultimate Plan feature.")
+        st.warning("🔒 NewsIQ is an Ultimate Plan feature.")
         st.link_button("Upgrade to Ultimate Plan", STRIPE_PAYMENT_LINK, type="primary")
     else:
         events = fetch_macro_news()
         if not events:
-            st.success("✅ No imminent high-impact USD news (NFP/CPI/FOMC) detected right now. Safe to scalp!")
+            st.success("✅ No imminent high-impact USD news detected right now.")
         else:
             for ev in events:
+                with st.container(border=True):
+                    st.markdown(f"**🔴 {ev.get('event', 'High-Impact Event')}** (`{ev.get('country', 'US')}`)")
+                    st.caption(f"Time: {ev.get('time', 'N/A')} | Forecast: `{ev.get('estimate', 'N/A')}` | Prev: `{ev.get('prev', 'N/A')}`")
+
+# --- TAB 4: AI ASSISTANT ---
+with selected_tabs[3]:
+    st.subheader("💬 Institutional AI Co-Pilot")
+    for msg in st.session_state.chat_messages:
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+
+    user_prompt = st.chat_input("Ask AI Trade Lens anything...")
+    if user_prompt:
+        st.session_state.chat_messages.append({"role": "user", "content": user_prompt})
